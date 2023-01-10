@@ -1,5 +1,5 @@
 a {
-    color:brown;
+    color:lawngreen;
     text-decoration:none;
     font-weight:600;
     font-style:italic;
@@ -17,5 +17,5 @@ h1 {
 
 body {
     font-family:sans-serif;
-    background:linear-gradient(green, black);
+    background:darkblue;
 }
