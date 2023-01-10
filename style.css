@@ -14,3 +14,8 @@ a:hover {
 h1 {
     color:orangered;
 }
+
+body {
+    font-family:sans-serif;
+    background:linear-gradient(green, black);
+}
