@@ -1,17 +1,98 @@
 package main
 
 import (
-  "net/http"
+	"log"
+	"net"
+	"net/http"
+	"time"
 
-  "github.com/gin-gonic/gin"
+	"embed"
+
+	"github.com/improbable-eng/grpc-web/go/grpcweb"
+	pingpong "github.com/percybolmer/grpcexample/pingpong"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 )
 
 func main() {
-  r := gin.Default()
-  r.GET("/ping", func(c *gin.Context) {
-    c.JSON(http.StatusOK, gin.H{
-      "message": "pong",
-    })
-  })
-  r.Run() // listen and serve on 0.0.0.0:8080 (for windows "localhost:8080")
+
+	// We Generate a TLS grpc API
+	apiserver, err := GenerateTLSApi("cert/server.crt", "cert/server.key")
+	if err != nil {
+		log.Fatal(err)
+	}
+	// Start listening on a TCP Port
+	lis, err := net.Listen("tcp", "127.0.0.1:9990")
+	if err != nil {
+		log.Fatal(err)
+	}
+	// We need to tell the code WHAT TO do on each request, ie. The business logic.
+	// In GRPC cases, the Server is acutally just an Interface
+	// So we need a struct which fulfills the server interface
+	// see server.go
+	s := &Server{}
+	// Register the API server as a PingPong Server
+	// The register function is a generated piece by protoc.
+	pingpong.RegisterPingPongServer(apiserver, s)
+	// Start serving in a goroutine to not block
+	go func() {
+		log.Fatal(apiserver.Serve(lis))
+	}()
+	// Wrap the GRPC Server in grpc-web and also host the UI
+	grpcWebServer := grpcweb.WrapServer(apiserver)
+	// Lets put the wrapped grpc server in our multiplexer struct so
+	// it can reach the grpc server in its handler
+	multiplex := grpcMultiplexer{
+		grpcWebServer,
+	}
+
+	// We need a http router
+	r := http.NewServeMux()
+	// Here we embed the buildt web application with the embed comment
+	//go:embed ui/pingpongapp/build
+	var app embed.FS
+	// Convert the embed.FS into a http.FS and serve it
+	webapp := http.FileServer(http.FS(app))
+	// Host the Web Application at /, and wrap it in the GRPC Multiplexer
+	// This allows grpc requests to transfer over HTTP1. then be
+	// routed by the multiplexer
+	r.Handle("/", multiplex.Handler(webapp))
+	// Create a HTTP server and bind the router to it, and set wanted address
+	srv := &http.Server{
+		Handler:      r,
+		Addr:         "localhost:8080",
+		WriteTimeout: 15 * time.Second,
+		ReadTimeout:  15 * time.Second,
+	}
+	// Serve the webapp over TLS
+	log.Fatal(srv.ListenAndServeTLS("cert/server.crt", "cert/server.key"))
+
+}
+
+// GenerateTLSApi will load TLS certificates and key and create a grpc server with those.
+func GenerateTLSApi(pemPath, keyPath string) (*grpc.Server, error) {
+	cred, err := credentials.NewServerTLSFromFile(pemPath, keyPath)
+	if err != nil {
+		return nil, err
+	}
+
+	s := grpc.NewServer(
+		grpc.Creds(cred),
+	)
+	return s, nil
+}
+
+type grpcMultiplexer struct {
+	*grpcweb.WrappedGrpcServer
+}
+
+// Handler is used to route requests to either grpc or to regular http
+func (m *grpcMultiplexer) Handler(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if m.IsGrpcWebRequest(r) {
+			m.ServeHTTP(w, r)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
